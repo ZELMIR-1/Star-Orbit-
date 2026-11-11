@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#0a1c33">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -1663,6 +1665,7 @@ const NICK_RE = /^[\p{L}\p{N}_.\- ]{2,20}$/u;
 const toEmail = l => l.trim().toLowerCase() + '@' + EMAIL_DOMAIN;
 const cleanNick = v => v.trim().replace(/\s+/g, ' ');
 let sb = null, user = null, profile = null, pendingRoom = null;
+let inviteOpen = false, waitText = '';
 let offline = false;   // офлайн-режим: игра без аккаунта и без сети
 
 const withTimeout = (p, ms) => new Promise((res, rej) => {
@@ -1831,17 +1834,102 @@ function showGift(gid, next){
     btn2: ['Забрать в инвентарь', next]
   });
 }
+/* ---------- Пуш-уведомления ---------- */
+const VAPID_PUBLIC = 'BBOnyJtlPkAG7EoTi6XSTwOtY7vj6UUHMb4i_gN2y_u4ayrAX_qmpVw5tjjBwn9z4feFhxhieIRk7rjHp4hyD_8';
+const PUSH_FN = SUPABASE_URL + '/functions/v1/push';
+const pushOK = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const pushFlag = () => user ? 'orbit-push-' + user.id : 'orbit-push-none';
+const pushIsOn = () => !!(pushOK() && user && store.get(pushFlag()) && Notification.permission === 'granted');
+function b64ToU8(s){
+  const r = atob((s + '='.repeat((4 - s.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(r, c => c.charCodeAt(0));
+}
+async function pushSub(){
+  if (!pushOK()) return null;
+  try { const reg = await navigator.serviceWorker.getRegistration(); return reg ? await reg.pushManager.getSubscription() : null; } catch(e){ return null; }
+}
+async function pushRegister(){
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToU8(VAPID_PUBLIC) });
+  const j = sub.toJSON();
+  const r = await sb.rpc('push_register', { p_endpoint: j.endpoint, p_p256dh: j.keys.p256dh, p_auth: j.keys.auth });
+  if (r.error) throw r.error;
+}
+async function pushEnable(){   // '' = успех, иначе текст ошибки
+  if (!pushOK()) return 'Здесь уведомления не поддерживаются. На iPhone добавь игру на экран «Домой» (iOS 16.4+).';
+  if (!sb || !user) return 'Нужен вход в аккаунт.';
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') return 'Уведомления запрещены. Разреши их в настройках браузера или приложения.';
+    await withTimeout(pushRegister(), 15000);
+    store.set(pushFlag(), '1');
+    return '';
+  } catch(e){ return 'Не удалось включить уведомления. Попробуй ещё раз.'; }
+}
+async function pushDisable(){
+  store.set(pushFlag(), '');
+  try { const s = await pushSub(); if (s && sb && user) await sb.rpc('push_unregister', { p_endpoint: s.endpoint }); } catch(e){}
+}
+async function pushDetach(){   // при выходе из аккаунта: устройство больше не получает пуши этого аккаунта
+  try { const s = await pushSub(); if (s && sb && user) await sb.rpc('push_unregister', { p_endpoint: s.endpoint }); } catch(e){}
+}
+let pushSyncAt = 0;
+async function pushSync(force){  // при входе и возвращении в игру: привязывает устройство к аккаунту и отмечает «был в игре»
+  if (!pushIsOn() || !sb) return;
+  if (!force && Date.now() - pushSyncAt < 30 * 60 * 1000) return;
+  pushSyncAt = Date.now();
+  try { await withTimeout(pushRegister(), 15000); } catch(e){}
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) pushSync(false); });
+
+function pushBtn6(note){
+  const on = pushIsOn();
+  setBtn(ovBtn6, ['🔔 Уведомления: ' + (on ? 'вкл' : 'выкл'), async () => {
+    if (ovBtn6.disabled) return;
+    ovBtn6.disabled = true;
+    let err = '';
+    if (pushIsOn()) await pushDisable(); else err = await pushEnable();
+    pushBtn6(note);
+    if (err) setNote(note, err, 'err');
+    else setNote(note, pushIsOn() ? 'Уведомления включены ✓' : 'Уведомления выключены.', 'ok');
+  }]);
+}
+function pushOffer(){   // один раз предлагаем включить уведомления (со второго захода)
+  if (!pushOK() || !user || store.get('orbit-push-asked') || Notification.permission !== 'default') return false;
+  const n = (parseInt(store.get('orbit-push-visits') || '0', 10) || 0) + 1;
+  store.set('orbit-push-visits', String(n));
+  if (n < 2) return false;
+  store.set('orbit-push-asked', '1');
+  showOverlay({
+    title: 'Уведомления', small: true,
+    text: 'Включить уведомления? Мы сообщим, когда друг позовёт тебя в комнату или пришлёт подарок. Это можно поменять в аккаунте.',
+    btn: ['Включить', async () => { await pushEnable(); showMenu(); }],
+    btn2: ['Не сейчас', showMenu]
+  });
+  return true;
+}
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => {
+  const d = e.data || {};
+  if (d.type !== 'push-click' || !/^[A-HJ-NP-Z2-9]{4}$/.test(d.room || '')) return;
+  if (multi && NET.code === d.room) return;
+  if (user && profile && !offline) enterRoom(d.room); else pendingRoom = d.room;
+});
+
 function afterLogin(){
+  pushSync(true);
   const gid = unseenGift();
   if (gid){ showGift(gid, goOn); return; }
   goOn();
 }
 function goOn(){
   if (pendingRoom){ const h = pendingRoom; pendingRoom = null; enterRoom(h); return; }
+  if (pushOffer()) return;
   showMenu();
 }
 async function logout(){
   await syncProgress();
+  try { await withTimeout(pushDetach(), 3000); } catch(e){}
   user = null; profile = null;
   try { await sb.auth.signOut(); } catch(e){}
   resetProgress();
@@ -2060,8 +2148,10 @@ function showAccount(){
         busy(false); setNote(note, 'Сохранено ✓', 'ok');
       } catch(e){ busy(false); setNote(note, 'Нет соединения с сервером.', 'err'); }
     }],
+    btn6: ['🔔 Уведомления', () => {}],
     btn2: ['Назад', showMenu],
-    btn3: ['Выйти из аккаунта', showLogoutConfirm]
+    btn3: ['Выйти из аккаунта', showLogoutConfirm],
+    after: () => pushBtn6(note)
   });
 }
 function showLogoutConfirm(){
@@ -2171,13 +2261,53 @@ function enterRoom(code){
   connect(code);
 }
 function showWaiting(text){
-  mode = 'lobby';
+  mode = 'lobby'; waitText = text;
+  if (inviteOpen && multi && !NET.order) return;   // не перебиваем окно приглашения
   showOverlay({
     title: 'Комната',
     big: NET.code,
     text,
     btn: ['Отправить ссылку', shareLink],
+    btn6: user ? ['Пригласить друга', showInvite] : null,
     btn3: ['Выйти', () => leaveRoom()]
+  });
+}
+function closeInvite(){ inviteOpen = false; showWaiting(waitText || 'Ждём игроков. Отправь код или ссылку.'); }
+async function sendInvite(q){
+  try {
+    const s = await sb.auth.getSession();
+    const tok = s.data && s.data.session && s.data.session.access_token;
+    if (!tok) return { ok: false, msg: 'Нужно войти в аккаунт.' };
+    const r = await withTimeout(fetch(PUSH_FN, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + tok, 'apikey': SUPABASE_KEY },
+      body: JSON.stringify({ action: 'invite', to: q, room: NET.code })
+    }), 10000);
+    const d = await r.json().catch(() => ({}));
+    return { ok: !!d.ok, msg: d.msg || (d.ok ? 'Приглашение отправлено ✓' : 'Не удалось отправить приглашение.') };
+  } catch(e){ return { ok: false, msg: 'Нет соединения с сервером.' }; }
+}
+function showInvite(){
+  if (!user || !sb || !NET.code) return;
+  inviteOpen = true;
+  let fi, note;
+  showOverlay({
+    title: 'Пригласить друга', small: true,
+    text: 'Введи ник или ID друга. Ему придёт уведомление с кодом комнаты ' + NET.code + '.',
+    form: box => {
+      fi = mkField(box, { label: 'Ник или ID', ph: 'Ник или #ID', max: 20 });
+      note = mkNote(box, '', 'err');
+    },
+    btn: ['Отправить', async () => {
+      const q = fi.value.trim().replace(/\s+/g, ' ');
+      if (!q){ setNote(note, 'Введи ник или ID друга.', 'err'); return; }
+      setNote(note, '', 'err'); busy(true, 'Отправляем…');
+      const res = await sendInvite(q);
+      busy(false);
+      setNote(note, res.msg, res.ok ? 'ok' : 'err');
+      if (res.ok) fi.value = '';
+    }],
+    btn2: ['Назад', closeInvite]
   });
 }
 async function shareLink(){
@@ -2367,7 +2497,7 @@ function showNetError(){
   });
 }
 function leaveRoom(silent){
-  multi = false; match.active = false;
+  multi = false; match.active = false; inviteOpen = false;
   NET.token++;
   mmStop();
   clearTimeout(NET.startT); NET.startT = 0; clearTimeout(NET.joinT); NET.joinT = 0;
@@ -2767,6 +2897,11 @@ const hash = (location.hash || '').slice(1).toUpperCase();
 if (/^[A-HJ-NP-Z2-9]{4}$/.test(hash)) pendingRoom = hash;
 startApp();
 })();
+</script>
+<script>
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('service-worker.js'); });
+}
 </script>
 </body>
 </html>

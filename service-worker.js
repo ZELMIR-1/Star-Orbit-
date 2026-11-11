@@ -1,5 +1,5 @@
 // Меняй версию при каждом обновлении игры, чтобы у игроков обновился кэш
-const CACHE = 'star-orbit-v1';
+const CACHE = 'star-orbit-v2';
 const CORE = ['./', 'index.html', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-180.png'];
 
@@ -36,4 +36,35 @@ self.addEventListener('fetch', e => {
     }
     return r;
   })));
+});
+
+/* ---------- Пуш-уведомления ---------- */
+self.addEventListener('push', e => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch (_) { d = { body: e.data ? e.data.text() : '' }; }
+  e.waitUntil(self.registration.showNotification(d.title || 'Звезды с Орбиты', {
+    body: d.body || '',
+    icon: 'icons/icon-192.png',
+    tag: d.tag || 'orbit',
+    renotify: !!d.tag,
+    data: { room: d.room || null, url: d.url || './' }
+  }));
+});
+
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  const d = e.notification.data || {};
+  const target = new URL(d.url || './', self.registration.scope);
+  if (d.room) target.hash = d.room;
+  e.waitUntil((async () => {
+    const list = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const c of list) {
+      if (new URL(c.url).origin === target.origin) {
+        try { await c.focus(); } catch (_) {}
+        c.postMessage({ type: 'push-click', room: d.room || null });
+        return;
+      }
+    }
+    await clients.openWindow(target.href);
+  })());
 });
