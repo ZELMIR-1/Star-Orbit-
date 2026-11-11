@@ -1835,7 +1835,7 @@ function showGift(gid, next){
   });
 }
 /* ---------- Пуш-уведомления ---------- */
-const VAPID_PUBLIC = 'BBOnyJtlPkAG7EoTi6XSTwOtY7vj6UUHMb4i_gN2y_u4ayrAX_qmpVw5tjjBwn9z4feFhxhieIRk7rjHp4hyD_8';
+const VAPID_PUBLIC = 'BF0Lw48pnWUi9yAr8dOQkK9I24ubLkAc0QId_JYRBwy2Xj7boIKdeS3F5tdmvQx-bPH_GIF95JE25AZ0UU0yPvI';
 const PUSH_FN = SUPABASE_URL + '/functions/v1/push';
 const pushOK = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 const pushFlag = () => user ? 'orbit-push-' + user.id : 'orbit-push-none';
